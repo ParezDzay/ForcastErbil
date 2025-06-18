@@ -1,210 +1,111 @@
-# app.py — Groundwater Forecasting
+# app.py — ANN · ARIMA · ARIMAX Forecasting for All Wells
 import streamlit as st, pandas as pd, numpy as np, os, json, hashlib, warnings
 from pathlib import Path
 from datetime import datetime
 from sklearn.metrics import mean_squared_error
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import MinMaxScaler
+from statsmodels.tsa.arima.model import ARIMA
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 from joblib import Parallel, delayed
+
 warnings.filterwarnings("ignore", category=UserWarning)
 
-# ───────── optional TensorFlow ─────────
 try:
     import tensorflow as tf
     from tensorflow.keras.models import Sequential
-    from tensorflow.keras.layers import Dense, LSTM, Conv1D, MaxPooling1D, Flatten
+    from tensorflow.keras.layers import Dense
     from tensorflow.keras.callbacks import EarlyStopping
-    tf.get_logger().setLevel("ERROR")
     _TF = True
-except ModuleNotFoundError:
+except:
     _TF = False
 
-st.set_page_config(page_title="Groundwater Forecasts", layout="wide")
-st.title("Groundwater Forecasting — fast by default")
+st.set_page_config(page_title="Groundwater Forecasts (ANN / ARIMA / ARIMAX)", layout="wide")
+st.title("Groundwater Forecasting — ANN · ARIMA · ARIMAX")
 
 DATA_PATH = "GW data (missing filled).csv"
-SUMMARY_CSV = "yearly_summaries.csv"
-st.session_state.setdefault("cache", {})
-st.session_state.setdefault("summ_tables", [])
-
-def md5(obj): return hashlib.md5(json.dumps(obj, sort_keys=True).encode()).hexdigest()
+H = 60
+FORECAST_YEARS = list(range(2025, 2030))
 
 @st.cache_data(show_spinner=False)
-def load_raw(path):
-    if not Path(path).exists():
-        return None
-    df = pd.read_csv(path)
-    try:
-        df.iloc[:, 0] = pd.to_datetime(df.iloc[:, 0], dayfirst=True, errors='coerce')
-        df.rename(columns={df.columns[0]: "Date"}, inplace=True)
-    except:
-        return None
-    if df["Date"].isnull().any():
-        return None
+def load_data():
+    if not Path(DATA_PATH).exists(): return None
+    df = pd.read_csv(DATA_PATH)
+    df.iloc[:, 0] = pd.to_datetime(df.iloc[:, 0], dayfirst=True, errors='coerce')
+    df.rename(columns={df.columns[0]: "Date"}, inplace=True)
+    df = df.dropna(subset=["Date"])
     return df.sort_values("Date").reset_index(drop=True)
 
-def clean_series(df, well):
-    s = df[well].copy()
+def clean_series(df, col):
+    s = df[col].copy()
     q1, q3 = s.quantile([0.25, 0.75])
     iqr = q3 - q1
-    s = s.where(s.between(q1 - 3 * iqr, q3 + 3 * iqr)).interpolate(limit_direction="both")
-    return pd.Series(s.values, index=df["Date"])
+    return s.where(s.between(q1 - 3*iqr, q3 + 3*iqr)).interpolate(limit_direction="both")
 
-def sarima(series, H, fast):
-    mdl = SARIMAX(series, order=(0, 1, 1), seasonal_order=(0, 1, 1, 12),
-                  enforce_stationarity=False, enforce_invertibility=False)
-    res = mdl.fit(disp=False, maxiter=25 if fast else 50)
-    fc = res.get_forecast(H).predicted_mean.round(2)
-    idx = pd.date_range(series.index[-1] + pd.DateOffset(months=1), periods=H, freq="MS")
-    return {"RMSE": round(res.mse ** 0.5, 4), "AIC": round(res.aic, 1), "BIC": round(res.bic, 1)}, pd.Series(fc.values, idx)
+def forecast_arima(series):
+    model = ARIMA(series, order=(1,1,1)).fit()
+    pred = model.forecast(steps=H)
+    return pd.Series(pred.values, index=pd.date_range(series.index[-1]+pd.DateOffset(months=1), periods=H, freq='MS'))
 
-def rf(series, H, lags, fast):
-    trees = 80 if fast else 300
-    df_lag = pd.concat({f"lag{k}": series.shift(k) for k in range(1, lags + 1)}, axis=1).dropna()
-    X, y = df_lag.values, series.loc[df_lag.index].values
-    split = int(len(X) * 0.8)
-    rf = RandomForestRegressor(n_estimators=trees, random_state=1).fit(X[:split], y[:split])
-    rmse = round(np.sqrt(mean_squared_error(y[split:], rf.predict(X[split:]))), 4)
-    hist = list(series.values[-lags:])
-    fc = []
+def forecast_arimax(series, exog):
+    model = SARIMAX(series, exog=exog, order=(1,1,1), enforce_stationarity=False, enforce_invertibility=False).fit()
+    future_exog = exog[-H:].reset_index(drop=True)
+    pred = model.forecast(steps=H, exog=future_exog)
+    return pd.Series(pred.values, index=pd.date_range(series.index[-1]+pd.DateOffset(months=1), periods=H, freq='MS'))
+
+def forecast_ann(series):
+    sc = MinMaxScaler()
+    data_scaled = sc.fit_transform(series.values.reshape(-1,1)).flatten()
+    X, y = [], []
+    lags = 12
+    for i in range(lags, len(data_scaled)):
+        X.append(data_scaled[i-lags:i])
+        y.append(data_scaled[i])
+    X, y = np.array(X), np.array(y)
+    model = Sequential([Dense(64, activation='relu', input_shape=(lags,)), Dense(1)])
+    model.compile(optimizer='adam', loss='mse')
+    model.fit(X, y, epochs=30, batch_size=8, verbose=0, callbacks=[EarlyStopping(patience=3)])
+    hist = list(data_scaled[-lags:])
+    fc_scaled = []
     for _ in range(H):
-        nxt = rf.predict(np.array(hist[-lags:][::-1]).reshape(1, -1))[0]
-        fc.append(round(nxt, 2))
-        hist.append(nxt)
-    idx = pd.date_range(series.index[-1] + pd.DateOffset(months=1), periods=H, freq="MS")
-    return {"RMSE": rmse, "Lags": lags, "Trees": trees}, pd.Series(fc, idx)
+        x_input = np.array(hist[-lags:]).reshape(1,-1)
+        yhat = model.predict(x_input, verbose=0)[0][0]
+        fc_scaled.append(yhat)
+        hist.append(yhat)
+    return pd.Series(sc.inverse_transform(np.array(fc_scaled).reshape(-1,1)).flatten(), index=pd.date_range(series.index[-1]+pd.DateOffset(months=1), periods=H, freq='MS'))
 
-if _TF:
-    def _build(shape, kind):
-        if kind == "lstm":
-            net = Sequential([LSTM(64, activation="tanh", input_shape=shape), Dense(1)])
-        else:
-            net = Sequential([Conv1D(32, 3, activation="relu", input_shape=shape),
-                              MaxPooling1D(2), Flatten(), Dense(32, activation="relu"), Dense(1)])
-        net.compile(optimizer="adam", loss="mse")
-        return net
-
-    def deep(series, H, lags, epochs, kind):
-        sc = MinMaxScaler()
-        scaled = sc.fit_transform(series.values.reshape(-1, 1)).flatten()
-        X, y = [], []
-        for i in range(lags, len(scaled)):
-            X.append(scaled[i - lags:i])
-            y.append(scaled[i])
-        X, y = np.array(X), np.array(y)
-        split = int(len(X) * 0.8)
-        Xtr, Xte, ytr, yte = X[:split], X[split:], y[:split], y[split:]
-        Xtr = Xtr.reshape((-1, lags, 1))
-        Xte = Xte.reshape((-1, lags, 1))
-        net = _build((lags, 1), kind)
-        net.fit(Xtr, ytr, validation_data=(Xte, yte), epochs=epochs, batch_size=16,
-                verbose=0, callbacks=[EarlyStopping(patience=3, restore_best_weights=True)])
-        rmse = round(np.sqrt(mean_squared_error(yte, net.predict(Xte, verbose=0).flatten())), 4)
-        hist = list(scaled[-lags:])
-        fc = []
-        for _ in range(H):
-            yhat = net.predict(np.array(hist[-lags:]).reshape(1, lags, 1), verbose=0)[0][0]
-            fc.append(yhat)
-            hist.append(yhat)
-        fc = sc.inverse_transform(np.array(fc).reshape(-1, 1)).flatten().round(2)
-        idx = pd.date_range(series.index[-1] + pd.DateOffset(months=1), periods=H, freq="MS")
-        return {"RMSE": rmse, "Lags": lags, "Epochs": epochs}, pd.Series(fc, idx)
-
-# ───────── UI and Execution ─────────
-raw = load_raw(DATA_PATH)
+raw = load_data()
 if raw is None:
-    st.error("CSV not found or invalid format (expected first column to be dates). Upload below.")
-    if up := st.sidebar.file_uploader("Upload CSV", type="csv"):
-        Path(DATA_PATH).write_bytes(up.read())
-        st.experimental_rerun()
+    st.error("CSV not found or invalid. Upload below.")
     st.stop()
 
-wells = [c for c in raw.columns if c.startswith("W")]
-if not wells:
-    st.error("No well columns found (columns should start with 'W').")
-    st.stop()
+all_wells = [c for c in raw.columns if c.startswith("W")]
+exog_vars = [c for c in raw.columns if c not in ["Date"] + all_wells]
 
-scope = st.sidebar.radio("Scope", ["Single well", "All wells"])
-if scope == "Single well":
-    well = st.sidebar.selectbox("Well", wells)
+model_choice = st.sidebar.radio("Model", ["ARIMA", "ARIMAX", "ANN"])
 
-fast_mode = st.sidebar.checkbox("Fast mode (quick & rough)", value=True)
-models = ["SARIMA", "Random-Forest"]
-if _TF:
-    models += ["LSTM", "CNN-LSTM"]
-model_choice = st.sidebar.radio("Model", models)
+results = []
 
-n_lags = None
-epochs = None
-if model_choice == "Random-Forest":
-    n_lags = st.sidebar.slider("RF lags", 6, 24, 12, 2)
-elif model_choice in ["LSTM", "CNN-LSTM"] and _TF:
-    n_lags = st.sidebar.slider("DL lags", 6, 24, 12, 2)
-    epochs = 8 if fast_mode else st.sidebar.slider("Epochs", 10, 100, 30, 10)
-elif model_choice in ["LSTM", "CNN-LSTM"] and not _TF:
-    st.error("TensorFlow not installed. Install it to use LSTM/CNN models.")
-    st.stop()
-
-H = 24 if (scope == "All wells" and fast_mode) else 60
-
-def forecast_for(well_id):
-    key = md5({"well": well_id, "model": model_choice, "lags": n_lags,
-               "epochs": epochs, "fast": fast_mode, "H": H})
-    if key in st.session_state["cache"]:
-        return st.session_state["cache"][key]
-    s = clean_series(raw, well_id)
-    if model_choice == "SARIMA":
-        m, f = sarima(s, H, fast_mode)
-    elif model_choice == "Random-Forest":
-        m, f = rf(s, H, n_lags, fast_mode)
-    elif model_choice == "LSTM":
-        m, f = deep(s, H, n_lags, epochs, "lstm")
+for well in all_wells:
+    s = clean_series(raw, well)
+    s.index = raw["Date"]
+    if model_choice == "ARIMA":
+        f = forecast_arima(s)
+    elif model_choice == "ARIMAX":
+        exog = raw[exog_vars].fillna(method='ffill').fillna(method='bfill')
+        exog.index = raw["Date"]
+        exog = exog.loc[s.index]
+        f = forecast_arimax(s, exog)
+    elif model_choice == "ANN" and _TF:
+        f = forecast_ann(s)
     else:
-        m, f = deep(s, H, n_lags, epochs, "cnn")
-    st.session_state["cache"][key] = (m, f)
-    return m, f
+        continue
+    yearly = f.resample("A").mean()
+    row = {"Well": well}
+    for y in FORECAST_YEARS:
+        sel = yearly[yearly.index.year == y]
+        row[str(y)] = round(sel.iloc[0],2) if not sel.empty else np.nan
+    results.append(row)
 
-targets = wells if scope == "All wells" else [well]
-def run_one(w): return w, *forecast_for(w)
-results = Parallel(n_jobs=-1)(delayed(run_one)(w) for w in targets) if len(targets) > 1 else [run_one(targets[0])]
-
-rows = []
-for w, metrics, future in results:
-    annual = future.resample("A").mean()
-    row = {"Well": w}
-    for yr in range(2025, 2030):
-        sel = annual[annual.index.year == yr]
-        row[str(yr)] = round(sel.iloc[0], 2) if not sel.empty else np.nan
-    row.update(metrics)
-    rows.append(row)
-
-summary = pd.DataFrame(rows)
-st.subheader("Yearly average depth (m)")
-st.dataframe(summary, use_container_width=True)
-
-if scope == "Single well":
-    _, metrics, future = results[0]
-    st.subheader("Model metrics")
-    st.table(pd.DataFrame(metrics, index=["Value"]))
-    st.subheader(f"{H//12}-year monthly forecast")
-    st.dataframe(future.to_frame("Depth"), use_container_width=True)
-
-if not summary.empty:
-    if os.path.exists(SUMMARY_CSV):
-        cur = pd.read_csv(SUMMARY_CSV)
-        subset_cols = [c for c in ["Well", "RMSE", "Lags", "Epochs", "Trees"] if c in summary.columns and c in cur.columns]
-        all_ = pd.concat([cur, summary]).drop_duplicates(subset=subset_cols, keep="last")
-        all_.to_csv(SUMMARY_CSV, index=False)
-    else:
-        summary.to_csv(SUMMARY_CSV, index=False)
-    st.session_state["summ_tables"].append(summary)
-
-n = len(st.session_state["summ_tables"])
-st.sidebar.markdown(f"**Session tables:** {n}")
-if n:
-    combo = pd.concat(st.session_state["summ_tables"]).reset_index(drop=True)
-    st.sidebar.download_button("⬇ Session CSV", combo.to_csv(index=False).encode(), f"session_{datetime.today().date()}.csv", "text/csv")
-if os.path.exists(SUMMARY_CSV):
-    with open(SUMMARY_CSV, "rb") as f:
-        st.sidebar.download_button("⬇ All-runs CSV", f.read(), SUMMARY_CSV, "text/csv")
+st.subheader(f"{model_choice} Forecast — 2025 to 2029")
+st.dataframe(pd.DataFrame(results), use_container_width=True)
