@@ -4,4 +4,4 @@ numpy
 scikit-learn
 statsmodels
 joblib
-tensorflow
+tensorflow==2.12.0
