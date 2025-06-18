@@ -7,7 +7,6 @@ from sklearn.preprocessing import MinMaxScaler
 from statsmodels.tsa.arima.model import ARIMA
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 from joblib import Parallel, delayed
-import plotly.express as px
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
