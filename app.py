@@ -7,6 +7,7 @@ from sklearn.preprocessing import MinMaxScaler
 from statsmodels.tsa.arima.model import ARIMA
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 from joblib import Parallel, delayed
+import plotly.express as px
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -102,7 +103,11 @@ exog_vars = [c for c in raw.columns if c not in ["Date"] + all_wells]
 
 model_choice = st.sidebar.radio("Model", ["ARIMA", "ARIMAX", "🔮 ANN"])
 
-if model_choice == "🔮 ANN" and _TF:
+if model_choice == "🔮 ANN":
+    if not _TF:
+        st.error("TensorFlow is not installed. ANN model is unavailable.")
+        st.stop()
+
     lags = st.sidebar.slider("Lag steps", 1, 24, 12)
     layers = tuple(int(x) for x in st.sidebar.text_input("Hidden layers", "64,32").split(",") if x.strip())
     scaler_choice = st.sidebar.selectbox("Scaler", ["Standard", "Robust"])
@@ -132,9 +137,13 @@ if model_choice == "🔮 ANN" and _TF:
         except Exception as e:
             st.warning(f"{well} failed: {e}")
             continue
-    result_df = pd.DataFrame(rows)
-    st.subheader("📊 ANN Forecast Summary (All Wells)")
-    st.dataframe(result_df, use_container_width=True)
+
+    if not rows:
+        st.warning("No ANN results available. Check data sufficiency or configuration.")
+    else:
+        result_df = pd.DataFrame(rows)
+        st.subheader("📊 ANN Forecast Summary (All Wells)")
+        st.dataframe(result_df, use_container_width=True)
 
 elif model_choice == "ARIMA":
     results = []
