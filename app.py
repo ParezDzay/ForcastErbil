@@ -100,9 +100,21 @@ if raw is None:
 all_wells = [c for c in raw.columns if c.startswith("W")]
 exog_vars = [c for c in raw.columns if c not in ["Date"] + all_wells]
 
-model_choice = st.sidebar.radio("Model", ["ARIMA", "ARIMAX", "🔮 ANN"])
+model_choice = st.sidebar.radio("Page", ["🏠 Home", "ARIMA", "ARIMAX", "🔮 ANN"])
 
-if model_choice == "🔮 ANN":
+if model_choice == "🏠 Home":
+    st.markdown("""
+    ## Welcome to the Groundwater Forecasting App
+    Select a model from the sidebar to begin forecasting groundwater depth across wells:
+
+    - 🔮 **ANN**: Artificial Neural Network-based forecast using lag features
+    - **ARIMA**: Time-series model for groundwater depth only
+    - **ARIMAX**: ARIMA extended with climate inputs (precipitation, temperature, etc.)
+    
+    Please ensure your data file is structured properly and contains all relevant variables.
+    """)
+
+elif model_choice == "🔮 ANN":
     if not _TF:
         st.error("TensorFlow is not installed. ANN model is unavailable.")
         st.stop()
