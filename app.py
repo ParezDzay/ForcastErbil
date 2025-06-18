@@ -20,18 +20,14 @@ try:
 except ModuleNotFoundError:
     _TF = False
 
-# ───────── Streamlit page ─────────
 st.set_page_config(page_title="Groundwater Forecasts", layout="wide")
 st.title("Groundwater Forecasting — fast by default")
 
 DATA_PATH = "GW data (missing filled).csv"
 SUMMARY_CSV = "yearly_summaries.csv"
-
-# ───────── session state ─────────
 st.session_state.setdefault("cache", {})
 st.session_state.setdefault("summ_tables", [])
 
-# ───────── helpers ─────────
 def md5(obj): return hashlib.md5(json.dumps(obj, sort_keys=True).encode()).hexdigest()
 
 @st.cache_data(show_spinner=False)
@@ -39,9 +35,13 @@ def load_raw(path):
     if not Path(path).exists():
         return None
     df = pd.read_csv(path)
-    if "Year" not in df.columns or "Months" not in df.columns:
+    try:
+        df.iloc[:, 0] = pd.to_datetime(df.iloc[:, 0], dayfirst=True, errors='coerce')
+        df.rename(columns={df.columns[0]: "Date"}, inplace=True)
+    except:
         return None
-    df["Date"] = pd.to_datetime(df["Year"].astype(str) + "-" + df["Months"].astype(str).str.zfill(2) + "-01")
+    if df["Date"].isnull().any():
+        return None
     return df.sort_values("Date").reset_index(drop=True)
 
 def clean_series(df, well):
@@ -51,7 +51,6 @@ def clean_series(df, well):
     s = s.where(s.between(q1 - 3 * iqr, q3 + 3 * iqr)).interpolate(limit_direction="both")
     return pd.Series(s.values, index=df["Date"])
 
-# ───────── model back-ends ─────────
 def sarima(series, H, fast):
     mdl = SARIMAX(series, order=(0, 1, 1), seasonal_order=(0, 1, 1, 12),
                   enforce_stationarity=False, enforce_invertibility=False)
@@ -112,10 +111,10 @@ if _TF:
         idx = pd.date_range(series.index[-1] + pd.DateOffset(months=1), periods=H, freq="MS")
         return {"RMSE": rmse, "Lags": lags, "Epochs": epochs}, pd.Series(fc, idx)
 
-# ───────── UI controls ─────────
+# ───────── UI and Execution ─────────
 raw = load_raw(DATA_PATH)
 if raw is None:
-    st.error("CSV not found or missing required columns ('Year', 'Months'). Upload below.")
+    st.error("CSV not found or invalid format (expected first column to be dates). Upload below.")
     if up := st.sidebar.file_uploader("Upload CSV", type="csv"):
         Path(DATA_PATH).write_bytes(up.read())
         st.experimental_rerun()
@@ -131,7 +130,6 @@ if scope == "Single well":
     well = st.sidebar.selectbox("Well", wells)
 
 fast_mode = st.sidebar.checkbox("Fast mode (quick & rough)", value=True)
-
 models = ["SARIMA", "Random-Forest"]
 if _TF:
     models += ["LSTM", "CNN-LSTM"]
@@ -145,12 +143,11 @@ elif model_choice in ["LSTM", "CNN-LSTM"] and _TF:
     n_lags = st.sidebar.slider("DL lags", 6, 24, 12, 2)
     epochs = 8 if fast_mode else st.sidebar.slider("Epochs", 10, 100, 30, 10)
 elif model_choice in ["LSTM", "CNN-LSTM"] and not _TF:
-    st.error("TensorFlow not installed. Install it to use deep learning models.")
+    st.error("TensorFlow not installed. Install it to use LSTM/CNN models.")
     st.stop()
 
 H = 24 if (scope == "All wells" and fast_mode) else 60
 
-# ───────── cache fetch/run ─────────
 def forecast_for(well_id):
     key = md5({"well": well_id, "model": model_choice, "lags": n_lags,
                "epochs": epochs, "fast": fast_mode, "H": H})
@@ -168,14 +165,10 @@ def forecast_for(well_id):
     st.session_state["cache"][key] = (m, f)
     return m, f
 
-# ───────── run forecasting ─────────
 targets = wells if scope == "All wells" else [well]
-
 def run_one(w): return w, *forecast_for(w)
-
 results = Parallel(n_jobs=-1)(delayed(run_one)(w) for w in targets) if len(targets) > 1 else [run_one(targets[0])]
 
-# ───────── display results ─────────
 rows = []
 for w, metrics, future in results:
     annual = future.resample("A").mean()
@@ -197,7 +190,6 @@ if scope == "Single well":
     st.subheader(f"{H//12}-year monthly forecast")
     st.dataframe(future.to_frame("Depth"), use_container_width=True)
 
-# ───────── append to CSV ─────────
 if not summary.empty:
     if os.path.exists(SUMMARY_CSV):
         cur = pd.read_csv(SUMMARY_CSV)
@@ -208,7 +200,6 @@ if not summary.empty:
         summary.to_csv(SUMMARY_CSV, index=False)
     st.session_state["summ_tables"].append(summary)
 
-# ───────── downloads ─────────
 n = len(st.session_state["summ_tables"])
 st.sidebar.markdown(f"**Session tables:** {n}")
 if n:
