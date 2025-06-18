@@ -7,7 +7,6 @@ from sklearn.preprocessing import MinMaxScaler
 from statsmodels.tsa.arima.model import ARIMA
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 from joblib import Parallel, delayed
-
 warnings.filterwarnings("ignore", category=UserWarning)
 
 try:
@@ -100,25 +99,9 @@ if raw is None:
 all_wells = [c for c in raw.columns if c.startswith("W")]
 exog_vars = [c for c in raw.columns if c not in ["Date"] + all_wells]
 
-model_choice = st.sidebar.radio("Page", ["🏠 Home", "ARIMA", "ARIMAX", "🔮 ANN"])
+model_choice = st.sidebar.radio("Model", ["ARIMA", "ARIMAX", "🔮 ANN"])
 
-if model_choice == "🏠 Home":
-    st.markdown("""
-    ## Welcome to the Groundwater Forecasting App
-    Select a model from the sidebar to begin forecasting groundwater depth across wells:
-
-    - 🔮 **ANN**: Artificial Neural Network-based forecast using lag features
-    - **ARIMA**: Time-series model for groundwater depth only
-    - **ARIMAX**: ARIMA extended with climate inputs (precipitation, temperature, etc.)
-    
-    Please ensure your data file is structured properly and contains all relevant variables.
-    """)
-
-elif model_choice == "🔮 ANN":
-    if not _TF:
-        st.error("TensorFlow is not installed. ANN model is unavailable.")
-        st.stop()
-
+if model_choice == "🔮 ANN" and _TF:
     lags = st.sidebar.slider("Lag steps", 1, 24, 12)
     layers = tuple(int(x) for x in st.sidebar.text_input("Hidden layers", "64,32").split(",") if x.strip())
     scaler_choice = st.sidebar.selectbox("Scaler", ["Standard", "Robust"])
@@ -148,13 +131,9 @@ elif model_choice == "🔮 ANN":
         except Exception as e:
             st.warning(f"{well} failed: {e}")
             continue
-
-    if not rows:
-        st.warning("No ANN results available. Check data sufficiency or configuration.")
-    else:
-        result_df = pd.DataFrame(rows)
-        st.subheader("📊 ANN Forecast Summary (All Wells)")
-        st.dataframe(result_df, use_container_width=True)
+    result_df = pd.DataFrame(rows)
+    st.subheader("📊 ANN Forecast Summary (All Wells)")
+    st.dataframe(result_df, use_container_width=True)
 
 elif model_choice == "ARIMA":
     results = []
