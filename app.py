@@ -31,11 +31,11 @@ LON_MIN, LON_MAX = 43.60, 44.30
 # GitHub raw URLs
 # ---------------------------------------------------------------------------
 LEVELS_URL = (
-  "https://raw.githubusercontent.com/your-username/your-repo/main/Monthly_Sea_Level_Data.csv"
+  "https://raw.githubusercontent.com/parezdzay/ForcastErbil/main/Monthly_Sea_Level_Data.csv"
 
 )
 COORDS_URL = (
-  "https://raw.githubusercontent.com/your-username/your-repo/main/wells.csv"
+  "https://raw.githubusercontent.com/parezdzay/ForcastErbil/main/wells.csv"
 
 )
 
