@@ -36,7 +36,7 @@ LEVELS_URL = (
 )
 COORDS_URL = (
     "https://raw.githubusercontent.com/"
-    "hawkarabdulhaq/waterdemo/main/wells.csv"
+    "wells.csv"
 )
 
 # ---------------------------------------------------------------------------
