@@ -169,17 +169,18 @@ def main() -> None:
         st.error("No W1…Wn columns found in the levels CSV.")
         st.stop()
 
+    # ---- Resample to annual ----------------------------------------------
+    levels["Year"] = levels["Date"].dt.year
+    annual_levels = levels.groupby("Year")[well_cols].mean().reset_index()
+
     # ---- Sidebar controls -------------------------------------------------
     st.sidebar.header("Controls")
-    date_opts = levels["Date"].dt.strftime("%Y-%m-%d")
-    date_sel = st.sidebar.selectbox("Month", date_opts, index=len(date_opts) - 1)
-    grid_res = st.sidebar.slider("Grid resolution (pixels)", 100, 500, 300, 50)
-    n_levels = st.sidebar.slider("Contour levels", 5, 30, 15, 1)
-
-    make_gif = st.sidebar.button("Generate GIF (all months)")
+    date_opts = annual_levels["Year"].astype(str)
+    date_sel = st.sidebar.selectbox("Year", date_opts, index=len(date_opts) - 1)
 
     # ---- Prepare selected month ------------------------------------------
-    levels_row = levels.loc[date_opts == date_sel, well_cols].iloc[0]
+  levels_row = annual_levels[annual_levels["Year"].astype(str) == date_sel][well_cols].iloc[0]
+
     month_df = (
         levels_row.rename_axis("well")
         .reset_index(name="level")
@@ -238,8 +239,8 @@ def main() -> None:
     if make_gif:
         with st.spinner("Generating GIF… this may take a minute"):
             frames: list[Image.Image] = []
-            for idx, (ts, row) in enumerate(levels[["Date"] + well_cols].iterrows()):
-                date_str = row["Date"].strftime("%Y-%m-%d")
+            for idx, row in annual_levels.iterrows():
+                date_str = str(row["Year"])
                 frame_df = (
                     row[well_cols]
                     .rename_axis("well")
