@@ -238,7 +238,7 @@ def main():
 
         y_pred = model.predict(X_test)
         r2 = r2_score(y_test, y_pred)
-        rmse = mean_squared_error(y_test, y_pred, squared=False)
+        rmse = mean_squared_error(y_test, y_pred) ** 0.5
         st.markdown(f"**R²**: {r2:.3f}, **RMSE**: {rmse:.3f}")
 
         future_df = pd.DataFrame({
