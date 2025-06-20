@@ -4,3 +4,5 @@ numpy
 matplotlib
 scipy
 pykrige
+scikit-learn
+Pillow
