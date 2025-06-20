@@ -32,7 +32,7 @@ LON_MIN, LON_MAX = 43.60, 44.30
 # ---------------------------------------------------------------------------
 LEVELS_URL = (
     "https://raw.githubusercontent.com/"
-    "hawkarabdulhaq/waterdemo/main/Monthly_Sea_Level_Data.csv"
+    "Monthly_Sea_Level_Data.csv"
 )
 COORDS_URL = (
     "https://raw.githubusercontent.com/"
