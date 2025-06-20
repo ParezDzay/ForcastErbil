@@ -1,174 +1,289 @@
-# app.py — ANN · ARIMA · ARIMAX Forecasting for All Wells
-import streamlit as st, pandas as pd, numpy as np, os, json, hashlib, warnings
-from pathlib import Path
-from datetime import datetime
-from sklearn.metrics import mean_squared_error
-from sklearn.preprocessing import MinMaxScaler
-from statsmodels.tsa.arima.model import ARIMA
-from statsmodels.tsa.statespace.sarimax import SARIMAX
-from joblib import Parallel, delayed
-warnings.filterwarnings("ignore", category=UserWarning)
+"""
+2-D groundwater surface (thin-plate-spline RBF) – Streamlit
+with GIF animation over time.
 
-try:
-    import tensorflow as tf
-    from tensorflow.keras.models import Sequential
-    from tensorflow.keras.layers import Dense
-    from tensorflow.keras.callbacks import EarlyStopping
-    _TF = True
-except:
-    _TF = False
+Data (raw from GitHub):
+  • Monthly_Sea_Level_Data.csv  – water levels by month (Date, W1…Wn)
+  • wells.csv                   – well IDs + coordinates
 
-st.set_page_config(page_title="Groundwater Forecasts (ANN / ARIMA / ARIMAX)", layout="wide")
-st.title("Groundwater Forecasting — ANN · ARIMA · ARIMAX")
+Map bounds are fixed to:
+  lat  35.80 – 36.40
+  lon  43.60 – 44.30
+"""
 
-DATA_PATH = "GW data (missing filled).csv"
-H = 60
-FORECAST_YEARS = list(range(2025, 2030))
+from __future__ import annotations
 
-@st.cache_data(show_spinner=False)
-def load_data():
-    if not Path(DATA_PATH).exists(): return None
-    df = pd.read_csv(DATA_PATH)
-    df.iloc[:, 0] = pd.to_datetime(df.iloc[:, 0], dayfirst=True, errors='coerce')
-    df.rename(columns={df.columns[0]: "Date"}, inplace=True)
-    df = df.dropna(subset=["Date"])
-    return df.sort_values("Date").reset_index(drop=True)
+import io
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import streamlit as st
+from scipy.interpolate import Rbf
+from PIL import Image
 
-def clean_series(df, col):
-    s = df[col].copy()
-    q1, q3 = s.quantile([0.25, 0.75])
-    iqr = q3 - q1
-    return s.where(s.between(q1 - 3*iqr, q3 + 3*iqr)).interpolate(limit_direction="both")
+# ---------------------------------------------------------------------------
+# Fixed bounding box
+# ---------------------------------------------------------------------------
+LAT_MIN, LAT_MAX = 35.80, 36.40
+LON_MIN, LON_MAX = 43.60, 44.30
 
-def clip_bounds(series):
-    return float(series.min()), float(series.max())
+# ---------------------------------------------------------------------------
+# GitHub raw URLs
+# ---------------------------------------------------------------------------
+LEVELS_URL = (
+    "https://raw.githubusercontent.com/"
+    "hawkarabdulhaq/waterdemo/main/Monthly_Sea_Level_Data.csv"
+)
+COORDS_URL = (
+    "https://raw.githubusercontent.com/"
+    "hawkarabdulhaq/waterdemo/main/wells.csv"
+)
 
-def add_lags(df, col, lags):
-    for i in range(1, lags + 1):
-        df[f"lag_{i}"] = df[col].shift(i)
-    return df.dropna()
+# ---------------------------------------------------------------------------
+# Data loaders (cached)
+# ---------------------------------------------------------------------------
 
-def train_ann(df, col, layers, lags, scaler_type, lo, hi):
-    df = df.copy()
-    from sklearn.model_selection import train_test_split
-    from sklearn.preprocessing import StandardScaler, RobustScaler
-    X = df[[f"lag_{i}" for i in range(1, lags + 1)]].values
-    y = df[col].values
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=0)
-    scaler = StandardScaler() if scaler_type == "Standard" else RobustScaler()
-    X_train = scaler.fit_transform(X_train)
-    X_test = scaler.transform(X_test)
-    model = Sequential()
-    model.add(Dense(layers[0], activation='relu', input_shape=(lags,)))
-    for units in layers[1:]:
-        model.add(Dense(units, activation='relu'))
-    model.add(Dense(1))
-    model.compile(optimizer='adam', loss='mse')
-    model.fit(X_train, y_train, epochs=50, batch_size=8, verbose=0, callbacks=[EarlyStopping(patience=5)])
-    y_pred = model.predict(X_test).flatten()
-    r2_train = model.evaluate(X_train, y_train, verbose=0)
-    r2_test = model.evaluate(X_test, y_test, verbose=0)
-    rmse_train = np.sqrt(np.mean((model.predict(X_train).flatten() - y_train) ** 2))
-    rmse_test = np.sqrt(np.mean((y_pred - y_test) ** 2))
-    metrics = {
-        "R2_train": r2_train,
-        "RMSE_train": rmse_train,
-        "R2_test": r2_test,
-        "RMSE_test": rmse_test
-    }
-    last_known = df.iloc[-1]
-    history = df[[f"lag_{i}" for i in range(1, lags + 1)]].values[-1].tolist()
-    future_preds = []
-    for _ in range(H):
-        x_input = np.array(history[-lags:]).reshape(1, -1)
-        yhat = model.predict(x_input, verbose=0)[0][0]
-        yhat = np.clip(yhat, lo, hi)
-        future_preds.append(yhat)
-        history.append(yhat)
-    future_dates = pd.date_range(df["Date"].max() + pd.DateOffset(months=1), periods=H, freq="MS")
-    future_df = pd.DataFrame({"Date": future_dates, "Depth": future_preds})
-    hist_df = df[["Date"]].copy()
-    hist_df["pred"] = model.predict(X).flatten()
-    return metrics, hist_df, future_df
 
-raw = load_data()
-if raw is None:
-    st.error("CSV not found or invalid. Upload below.")
-    st.stop()
+@st.cache_data
+def load_levels() -> pd.DataFrame:
+    """Monthly water levels."""
+    return pd.read_csv(LEVELS_URL, parse_dates=["Date"])
 
-all_wells = [c for c in raw.columns if c.startswith("W")]
-exog_vars = [c for c in raw.columns if c not in ["Date"] + all_wells]
 
-model_choice = st.sidebar.radio("Model", ["ARIMA", "ARIMAX", "🔮 ANN"])
+@st.cache_data
+def load_coords() -> pd.DataFrame:
+    """
+    Well coordinates – normalise column names and drop duplicates.
 
-if model_choice == "🔮 ANN" and _TF:
-    lags = st.sidebar.slider("Lag steps", 1, 24, 12)
-    layers = tuple(int(x) for x in st.sidebar.text_input("Hidden layers", "64,32").split(",") if x.strip())
-    scaler_choice = st.sidebar.selectbox("Scaler", ["Standard", "Robust"])
+    ID synonyms  : well | no | id | well_name
+    Lat synonyms : lat  | latitude | y | northing
+    Lon synonyms : lon  | lng | longitude | x | easting
+    """
+    df = pd.read_csv(COORDS_URL)
 
-    rows = []
-    for well in all_wells:
-        clean = clean_series(raw, well)
-        lo, hi = clip_bounds(clean)
-        if len(clean) < lags * 10:
-            continue
-        feat = pd.DataFrame({"Date": raw["Date"], well: clean})
-        feat = add_lags(feat, well, lags)
-        try:
-            metrics, hist, future = train_ann(feat, well, layers, lags, scaler_choice, lo, hi)
-            row = {
-                "Well": well,
-                "R²_train": round(metrics.get("R2_train", 0), 4),
-                "RMSE_train": round(metrics.get("RMSE_train", 0), 4),
-                "R²_test": round(metrics.get("R2_test", 0), 4),
-                "RMSE_test": round(metrics.get("RMSE_test", 0), 4)
-            }
-            annual = future.resample("A", on="Date").mean()
-            for year in range(2025, 2030):
-                val = annual[annual.index.year == year]["Depth"]
-                row[str(year)] = round(val.values[0], 2) if not val.empty else None
-            rows.append(row)
-        except Exception as e:
-            st.warning(f"{well} failed: {e}")
-            continue
-    result_df = pd.DataFrame(rows)
-    st.subheader("📊 ANN Forecast Summary (All Wells)")
-    st.dataframe(result_df, use_container_width=True)
+    id_syn  = {"well", "no", "id", "well_name"}
+    lat_syn = {"lat", "latitude", "y", "northing"}
+    lon_syn = {"lon", "lng", "longitude", "x", "easting"}
 
-elif model_choice == "ARIMA":
-    results = []
-    for well in all_wells:
-        s = clean_series(raw, well)
-        s.index = raw["Date"]
-        model = ARIMA(s, order=(1,1,1)).fit()
-        pred = model.forecast(steps=H)
-        f = pd.Series(pred.values, index=pd.date_range(s.index[-1]+pd.DateOffset(months=1), periods=H, freq='MS'))
-        yearly = f.resample("A").mean()
-        row = {"Well": well}
-        for y in FORECAST_YEARS:
-            sel = yearly[yearly.index.year == y]
-            row[str(y)] = round(sel.iloc[0],2) if not sel.empty else np.nan
-        results.append(row)
-    st.subheader("ARIMA Forecast — 2025 to 2029")
-    st.dataframe(pd.DataFrame(results), use_container_width=True)
+    rename = {}
+    id_done = lat_done = lon_done = False
+    for col in df.columns:
+        c = col.lower()
+        if c in id_syn and not id_done:
+            rename[col] = "well"
+            id_done = True
+        elif c in lat_syn and not lat_done:
+            rename[col] = "lat"
+            lat_done = True
+        elif c in lon_syn and not lon_done:
+            rename[col] = "lon"
+            lon_done = True
+    df = df.rename(columns=rename).loc[:, ~df.columns.duplicated(keep="first")]
 
-elif model_choice == "ARIMAX":
-    results = []
-    for well in all_wells:
-        s = clean_series(raw, well)
-        s.index = raw["Date"]
-        exog = raw[exog_vars].fillna(method='ffill').fillna(method='bfill')
-        exog.index = raw["Date"]
-        exog = exog.loc[s.index]
-        model = SARIMAX(s, exog=exog, order=(1,1,1), enforce_stationarity=False, enforce_invertibility=False).fit()
-        future_exog = exog[-H:].reset_index(drop=True)
-        pred = model.forecast(steps=H, exog=future_exog)
-        f = pd.Series(pred.values, index=pd.date_range(s.index[-1]+pd.DateOffset(months=1), periods=H, freq='MS'))
-        yearly = f.resample("A").mean()
-        row = {"Well": well}
-        for y in FORECAST_YEARS:
-            sel = yearly[yearly.index.year == y]
-            row[str(y)] = round(sel.iloc[0],2) if not sel.empty else np.nan
-        results.append(row)
-    st.subheader("ARIMAX Forecast — 2025 to 2029")
-    st.dataframe(pd.DataFrame(results), use_container_width=True)
+    missing = {"well", "lat", "lon"} - set(df.columns)
+    if missing:
+        st.error(f"`wells.csv` is missing column(s): {', '.join(sorted(missing))}")
+        st.stop()
+
+    return df[["well", "lat", "lon"]]
+
+
+# ---------------------------------------------------------------------------
+# Interpolation helper
+# ---------------------------------------------------------------------------
+
+
+def rbf_surface(lon: np.ndarray, lat: np.ndarray, z: np.ndarray, res: int):
+    """Return meshgrid (lon_g, lat_g, z_g) on fixed bounds using thin-plate RBF."""
+    rbf = Rbf(lon, lat, z, function="thin_plate")
+    lon_g, lat_g = np.meshgrid(
+        np.linspace(LON_MIN, LON_MAX, res),
+        np.linspace(LAT_MIN, LAT_MAX, res),
+    )
+    z_g = rbf(lon_g, lat_g)
+    return lon_g, lat_g, z_g
+
+
+# ---------------------------------------------------------------------------
+# Plot single frame
+# ---------------------------------------------------------------------------
+
+
+def draw_frame(
+    lon_arr: np.ndarray,
+    lat_arr: np.ndarray,
+    z_arr: np.ndarray,
+    date_label: str,
+    grid_res: int,
+    n_levels: int,
+) -> Image.Image:
+    """Return a PIL Image of the contour plot for one month."""
+    lon_g, lat_g, z_g = rbf_surface(lon_arr, lat_arr, z_arr, grid_res)
+
+    fig, ax = plt.subplots(figsize=(5, 5), dpi=100)
+    cf = ax.contourf(
+        lon_g,
+        lat_g,
+        z_g,
+        levels=n_levels,
+        cmap="viridis",
+        alpha=0.75,
+    )
+    ax.scatter(
+        lon_arr,
+        lat_arr,
+        c=z_arr,
+        edgecolors="black",
+        s=60,
+        label="Wells",
+    )
+    ax.set_xlim(LON_MIN, LON_MAX)
+    ax.set_ylim(LAT_MIN, LAT_MAX)
+    ax.set_aspect("equal", "box")
+    ax.set_xlabel("Longitude")
+    ax.set_ylabel("Latitude")
+    ax.set_title(f"Water Table — {date_label}")
+    fig.colorbar(cf, ax=ax, label="Level")
+    ax.legend(loc="upper right")
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    return Image.open(buf)
+
+
+# ---------------------------------------------------------------------------
+# Streamlit app
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    st.title("2-D Water-Table Map (RBF) + GIF Animation")
+
+    # ---- Load data --------------------------------------------------------
+    levels = load_levels()
+    coords = load_coords()
+    well_cols = [c for c in levels.columns if c.upper().startswith("W")]
+
+    if not well_cols:
+        st.error("No W1…Wn columns found in the levels CSV.")
+        st.stop()
+
+    # ---- Sidebar controls -------------------------------------------------
+    st.sidebar.header("Controls")
+    date_opts = levels["Date"].dt.strftime("%Y-%m-%d")
+    date_sel = st.sidebar.selectbox("Month", date_opts, index=len(date_opts) - 1)
+    grid_res = st.sidebar.slider("Grid resolution (pixels)", 100, 500, 300, 50)
+    n_levels = st.sidebar.slider("Contour levels", 5, 30, 15, 1)
+
+    make_gif = st.sidebar.button("Generate GIF (all months)")
+
+    # ---- Prepare selected month ------------------------------------------
+    levels_row = levels.loc[date_opts == date_sel, well_cols].iloc[0]
+    month_df = (
+        levels_row.rename_axis("well")
+        .reset_index(name="level")
+        .merge(coords, on="well", how="inner")
+        .dropna(subset=["lat", "lon", "level"])
+    )
+
+    if month_df.empty:
+        st.warning("No matching wells between the two CSV files.")
+        st.stop()
+
+    lon = month_df["lon"].to_numpy(float)
+    lat = month_df["lat"].to_numpy(float)
+    z   = month_df["level"].to_numpy(float)
+
+    # ---- Draw current month ----------------------------------------------
+    lon_g, lat_g, z_g = rbf_surface(lon, lat, z, grid_res)
+
+    fig, ax = plt.subplots()
+    cf = ax.contourf(
+        lon_g,
+        lat_g,
+        z_g,
+        levels=n_levels,
+        cmap="viridis",
+        alpha=0.75,
+    )
+    ax.scatter(
+        lon,
+        lat,
+        c=z,
+        edgecolors="black",
+        s=80,
+        label="Wells",
+    )
+    ax.set_xlim(LON_MIN, LON_MAX)
+    ax.set_ylim(LAT_MIN, LAT_MAX)
+    ax.set_aspect("equal", "box")
+    ax.set_xlabel("Longitude")
+    ax.set_ylabel("Latitude")
+    ax.set_title(f"Water-Table Surface — {date_sel}")
+    fig.colorbar(cf, ax=ax, label="Level")
+    ax.legend()
+    st.pyplot(fig, clear_figure=True)
+
+    # ---- Table -----------------------------------------------------------
+    with st.expander("Raw data for this month"):
+        st.dataframe(
+            month_df[["well", "lat", "lon", "level"]]
+            .set_index("well")
+            .sort_index(),
+            use_container_width=True,
+        )
+
+    # ---- GIF generation ---------------------------------------------------
+    if make_gif:
+        with st.spinner("Generating GIF… this may take a minute"):
+            frames: list[Image.Image] = []
+            for idx, (ts, row) in enumerate(levels[["Date"] + well_cols].iterrows()):
+                date_str = row["Date"].strftime("%Y-%m-%d")
+                frame_df = (
+                    row[well_cols]
+                    .rename_axis("well")
+                    .reset_index(name="level")
+                    .merge(coords, on="well", how="inner")
+                    .dropna(subset=["lat", "lon", "level"])
+                )
+                if frame_df.empty:
+                    continue
+                frame_img = draw_frame(
+                    frame_df["lon"].to_numpy(float),
+                    frame_df["lat"].to_numpy(float),
+                    frame_df["level"].to_numpy(float),
+                    date_str,
+                    grid_res,
+                    n_levels,
+                )
+                frames.append(frame_img)
+
+            if not frames:
+                st.error("No frames could be generated (missing data).")
+                return
+
+            gif_bytes = io.BytesIO()
+            frames[0].save(
+                gif_bytes,
+                format="GIF",
+                save_all=True,
+                append_images=frames[1:],
+                duration=500,   # ms per frame
+                loop=0,
+            )
+            gif_bytes.seek(0)
+
+        st.subheader("Time-Series Animation")
+        st.image(gif_bytes.getvalue())
+
+        st.download_button(
+            "Download GIF",
+            data=gif_bytes.getvalue(),
+            file_name="water_table_animation.gif",
+            mime="image/gif",
+        )
+
+
+if __name__ == "__main__":
+    main()
