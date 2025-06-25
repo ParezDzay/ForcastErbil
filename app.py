@@ -25,17 +25,7 @@ COORDS_URL = "https://raw.githubusercontent.com/parezdzay/ForcastErbil/main/well
 # ---------------------------------------------------------------------------
 @st.cache_data
 def load_levels() -> pd.DataFrame:
-    df = pd.read_csv(LEVELS_URL)
-
-    # 🔧 Replace with the correct date column name if available
-    for col in df.columns:
-        if col.lower() == "date":
-            df["Date"] = pd.to_datetime(df[col])
-            break
-    else:
-        df["Date"] = pd.NaT  # If no date column, assign NaT
-
-    return df
+    return pd.read_csv(LEVELS_URL)  # uses 'Year' column, not 'Date'
 
 @st.cache_data
 def load_coords() -> pd.DataFrame:
@@ -98,12 +88,7 @@ def main():
         st.error("No W1…Wn columns found.")
         st.stop()
 
-    if "Date" not in levels.columns or pd.isna(levels["Date"]).all():
-        st.error("Date column not found or invalid. Please update the CSV.")
-        st.stop()
-
-    levels["Year"] = levels["Date"].dt.year
-    annual_levels = levels.groupby("Year")[well_cols].mean().reset_index()
+    annual_levels = levels.copy()
 
     st.sidebar.header("Controls")
     year_opts = annual_levels["Year"].astype(str)
