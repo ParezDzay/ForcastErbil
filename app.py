@@ -25,7 +25,17 @@ COORDS_URL = "https://raw.githubusercontent.com/parezdzay/ForcastErbil/main/well
 # ---------------------------------------------------------------------------
 @st.cache_data
 def load_levels() -> pd.DataFrame:
-    return pd.read_csv(LEVELS_URL, parse_dates=["Date"])
+    df = pd.read_csv(LEVELS_URL)
+
+    # 🔧 Replace with the correct date column name if available
+    for col in df.columns:
+        if col.lower() == "date":
+            df["Date"] = pd.to_datetime(df[col])
+            break
+    else:
+        df["Date"] = pd.NaT  # If no date column, assign NaT
+
+    return df
 
 @st.cache_data
 def load_coords() -> pd.DataFrame:
@@ -81,96 +91,105 @@ def main():
     st.set_page_config(layout="wide")
     st.title("Groundwater Dashboard")
 
-    page = "📊 Water-Table Map"  # Only map page available now
+    levels = load_levels()
+    coords = load_coords()
+    well_cols = [c for c in levels.columns if c.upper().startswith("W")]
+    if not well_cols:
+        st.error("No W1…Wn columns found.")
+        st.stop()
 
-    if page == "📊 Water-Table Map":
-        levels = load_levels(); coords = load_coords()
-        well_cols = [c for c in levels.columns if c.upper().startswith("W")]
-        if not well_cols: st.error("No W1…Wn columns found."); st.stop()
+    if "Date" not in levels.columns or pd.isna(levels["Date"]).all():
+        st.error("Date column not found or invalid. Please update the CSV.")
+        st.stop()
 
-        levels["Year"] = levels["Date"].dt.year
-        annual_levels = levels.groupby("Year")[well_cols].mean().reset_index()
+    levels["Year"] = levels["Date"].dt.year
+    annual_levels = levels.groupby("Year")[well_cols].mean().reset_index()
 
-        st.sidebar.header("Controls")
-        year_opts = annual_levels["Year"].astype(str)
-        year_sel = st.sidebar.selectbox("Year", year_opts, index=len(year_opts) - 1)
-        grid_res = st.sidebar.slider("Grid resolution (pixels)", 100, 500, 300, 50)
-        n_levels = st.sidebar.slider("Contour levels", 5, 30, 15, 1)
-        make_gif = st.sidebar.button("Generate GIF (all years)")
+    st.sidebar.header("Controls")
+    year_opts = annual_levels["Year"].astype(str)
+    year_sel = st.sidebar.selectbox("Year", year_opts, index=len(year_opts) - 1)
+    grid_res = st.sidebar.slider("Grid resolution (pixels)", 100, 500, 300, 50)
+    n_levels = st.sidebar.slider("Contour levels", 5, 30, 15, 1)
+    make_gif = st.sidebar.button("Generate GIF (all years)")
 
-        year_row = annual_levels[annual_levels["Year"].astype(str) == year_sel][well_cols].iloc[0]
-        year_df = (
-            year_row.rename_axis("well")
-            .reset_index(name="level")
-            .merge(coords, on="well", how="inner")
-            .dropna(subset=["lat", "lon", "level"])
+    year_row = annual_levels[annual_levels["Year"].astype(str) == year_sel][well_cols].iloc[0]
+    year_df = (
+        year_row.rename_axis("well")
+        .reset_index(name="level")
+        .merge(coords, on="well", how="inner")
+        .dropna(subset=["lat", "lon", "level"])
+    )
+    if year_df.empty:
+        st.warning("No matching wells.")
+        st.stop()
+
+    lon = year_df["lon"].to_numpy(float)
+    lat = year_df["lat"].to_numpy(float)
+    z = year_df["level"].to_numpy(float)
+    lon_g, lat_g, z_g = rbf_surface(lon, lat, z, grid_res)
+
+    fig, ax = plt.subplots()
+    cf = ax.contourf(lon_g, lat_g, z_g, levels=n_levels, cmap="viridis", alpha=0.75)
+    ax.scatter(lon, lat, c=z, edgecolors="black", s=80, label="Wells")
+    ax.set_xlim(LON_MIN, LON_MAX)
+    ax.set_ylim(LAT_MIN, LAT_MAX)
+    ax.set_aspect("equal", "box")
+    ax.set_xlabel("Longitude")
+    ax.set_ylabel("Latitude")
+    ax.set_title(f"Water-Table Surface — {year_sel}")
+    fig.colorbar(cf, ax=ax, label="Level")
+    ax.legend()
+    st.pyplot(fig, clear_figure=True)
+
+    with st.expander("Raw data for this year"):
+        st.dataframe(
+            year_df[["well", "lat", "lon", "level"]]
+            .set_index("well")
+            .sort_index(),
+            use_container_width=True,
         )
-        if year_df.empty: st.warning("No matching wells."); st.stop()
 
-        lon = year_df["lon"].to_numpy(float)
-        lat = year_df["lat"].to_numpy(float)
-        z = year_df["level"].to_numpy(float)
-        lon_g, lat_g, z_g = rbf_surface(lon, lat, z, grid_res)
-
-        fig, ax = plt.subplots()
-        cf = ax.contourf(lon_g, lat_g, z_g, levels=n_levels, cmap="viridis", alpha=0.75)
-        ax.scatter(lon, lat, c=z, edgecolors="black", s=80, label="Wells")
-        ax.set_xlim(LON_MIN, LON_MAX)
-        ax.set_ylim(LAT_MIN, LAT_MAX)
-        ax.set_aspect("equal", "box")
-        ax.set_xlabel("Longitude")
-        ax.set_ylabel("Latitude")
-        ax.set_title(f"Water-Table Surface — {year_sel}")
-        fig.colorbar(cf, ax=ax, label="Level")
-        ax.legend()
-        st.pyplot(fig, clear_figure=True)
-
-        with st.expander("Raw data for this year"):
-            st.dataframe(
-                year_df[["well", "lat", "lon", "level"]]
-                .set_index("well")
-                .sort_index(),
-                use_container_width=True,
-            )
-
-        if make_gif:
-            with st.spinner("Generating GIF…"):
-                frames = []
-                for _, row in annual_levels.iterrows():
-                    year = str(int(row["Year"]))
-                    frame_df = (
-                        row[well_cols]
-                        .rename_axis("well")
-                        .reset_index(name="level")
-                        .merge(coords, on="well", how="inner")
-                        .dropna(subset=["lat", "lon", "level"])
-                    )
-                    if frame_df.empty: continue
-                    img = draw_frame(
-                        frame_df["lon"].to_numpy(float),
-                        frame_df["lat"].to_numpy(float),
-                        frame_df["level"].to_numpy(float),
-                        year,
-                        grid_res,
-                        n_levels,
-                    )
-                    frames.append(img)
-
-                if not frames: st.error("No frames generated."); return
-                gif_bytes = io.BytesIO()
-                frames[0].save(
-                    gif_bytes, format="GIF",
-                    save_all=True, append_images=frames[1:], duration=500, loop=0,
+    if make_gif:
+        with st.spinner("Generating GIF…"):
+            frames = []
+            for _, row in annual_levels.iterrows():
+                year = str(int(row["Year"]))
+                frame_df = (
+                    row[well_cols]
+                    .rename_axis("well")
+                    .reset_index(name="level")
+                    .merge(coords, on="well", how="inner")
+                    .dropna(subset=["lat", "lon", "level"])
                 )
-                gif_bytes.seek(0)
-            st.subheader("Time-Series Animation")
-            st.image(gif_bytes.getvalue())
-            st.download_button(
-                "Download GIF",
-                data=gif_bytes.getvalue(),
-                file_name="water_table_animation_annual.gif",
-                mime="image/gif",
+                if frame_df.empty:
+                    continue
+                img = draw_frame(
+                    frame_df["lon"].to_numpy(float),
+                    frame_df["lat"].to_numpy(float),
+                    frame_df["level"].to_numpy(float),
+                    year,
+                    grid_res,
+                    n_levels,
+                )
+                frames.append(img)
+
+            if not frames:
+                st.error("No frames generated.")
+                return
+            gif_bytes = io.BytesIO()
+            frames[0].save(
+                gif_bytes, format="GIF",
+                save_all=True, append_images=frames[1:], duration=500, loop=0,
             )
+            gif_bytes.seek(0)
+        st.subheader("Time-Series Animation")
+        st.image(gif_bytes.getvalue())
+        st.download_button(
+            "Download GIF",
+            data=gif_bytes.getvalue(),
+            file_name="water_table_animation_annual.gif",
+            mime="image/gif",
+        )
 
 if __name__ == "__main__":
     main()
