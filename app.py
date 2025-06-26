@@ -155,7 +155,7 @@ def main():
             buf = io.BytesIO()
             frames[0].save(
                 buf, format="GIF", save_all=True,
-                append_images=frames[1:], duration=400, loop=0
+                append_images=frames[1:], duration=900, loop=0
             )
             buf.seek(0)
 
