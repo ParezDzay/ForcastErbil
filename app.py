@@ -67,7 +67,7 @@ def draw_frame(
         fig.colorbar(sc, ax=ax, label="Level")
 
     # Scatter wells & annotate
-    ax.scatter(lon_arr, lat_arr, c=z_arr, edgecolors="black", s=120, label="Wells")
+    ax.scatter(lon_arr, lat_arr, c=z_arr, edgecolors="black", s=80, label="Wells")
     for x, y, name in zip(lon_arr, lat_arr, lbls):
         ax.text(
             x, y,
