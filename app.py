@@ -23,7 +23,7 @@ COORDS_URL = (
 )
 
 # ──────────────────────────────────────────────────────────
-# HELPERS (unchanged)
+# HELPERS (unchanged except draw_frame)
 # ──────────────────────────────────────────────────────────
 def normalise_well(name: str) -> str:
     s = unicodedata.normalize("NFKD", str(name).strip().upper())
@@ -39,17 +39,31 @@ def rbf_surface(lon, lat, z, res):
     return lon_g, lat_g, rbf(lon_g, lat_g)
 
 def draw_frame(lon, lat, z, title, grid_res, n_levels) -> Image.Image:
+    # 1) convert to float arrays
+    lon_arr = np.asarray(lon, dtype=float)
+    lat_arr = np.asarray(lat, dtype=float)
+    z_arr   = np.asarray(z,   dtype=float)
+
+    # 2) drop any rows with NaN
+    mask = (~np.isnan(lon_arr)) & (~np.isnan(lat_arr)) & (~np.isnan(z_arr))
+    lon_arr, lat_arr, z_arr = lon_arr[mask], lat_arr[mask], z_arr[mask]
+
     fig, ax = plt.subplots(figsize=(5, 5), dpi=100)
-    if len(lon) >= 3:
-        lon_g, lat_g, z_g = rbf_surface(lon, lat, z, grid_res)
-        cf = ax.contourf(lon_g, lat_g, z_g, levels=n_levels,
-                         cmap="viridis", alpha=0.75)
+
+    # 3) only interpolate if we have 3+ valid wells
+    if len(lon_arr) >= 3:
+        lon_g, lat_g, z_g = rbf_surface(lon_arr, lat_arr, z_arr, grid_res)
+        cf = ax.contourf(
+            lon_g, lat_g, z_g, levels=n_levels,
+            cmap="viridis", alpha=0.75
+        )
         fig.colorbar(cf, ax=ax, label="Level")
     else:
-        sc = ax.scatter(lon, lat, c=z, cmap="viridis")
+        # scatter‐only to still show values
+        sc = ax.scatter(lon_arr, lat_arr, c=z_arr, cmap="viridis")
         fig.colorbar(sc, ax=ax, label="Level")
 
-    ax.scatter(lon, lat, c=z, edgecolors="black", s=120, label="Wells")
+    ax.scatter(lon_arr, lat_arr, c=z_arr, edgecolors="black", s=120, label="Wells")
     ax.set(
         xlim=(LON_MIN, LON_MAX),
         ylim=(LAT_MIN, LAT_MAX),
@@ -90,21 +104,17 @@ def load_coords() -> pd.DataFrame:
     return df.drop_duplicates(subset="well")
 
 # ──────────────────────────────────────────────────────────
-# MAIN APP (with full 2004–2029 and Period tagging)
+# MAIN APP (unchanged)
 # ──────────────────────────────────────────────────────────
 def main():
     st.set_page_config(layout="wide")
     st.title("Groundwater Dashboard")
 
-    # Load raw observed data
-    raw = load_levels_raw()
+    raw    = load_levels_raw()
     coords = load_coords()
 
-    # Build a DataFrame of all years 2004–2029
     all_years = pd.DataFrame({"Year": list(range(2004, 2030))})
-
-    # Left-join your observed data onto the full range
-    levels = (
+    levels   = (
         all_years
         .merge(raw, on="Year", how="left")
         .assign(
@@ -112,99 +122,62 @@ def main():
         )
     )
 
-    # Identify well columns W1…W20
     well_cols = [c for c in levels.columns if c.startswith("W")]
     if not well_cols:
-        st.error("No W1…Wn columns found in your data.")
-        return
+        st.error("No W# columns found."); return
 
-    # Sidebar controls
     years_str = levels["Year"].astype(str)
-    yr_sel = st.sidebar.selectbox("Year", years_str, index=len(years_str) - 1)
-    grid_res = st.sidebar.slider("Grid resolution (px)", 100, 500, 300, 50)
-    n_levels = st.sidebar.slider("Contour levels", 5, 30, 15, 1)
-    make_gif = st.sidebar.button("Generate GIF (all years)")
+    yr_sel    = st.sidebar.selectbox("Year", years_str, index=len(years_str)-1)
+    grid_res  = st.sidebar.slider("Grid resolution (px)", 100, 500, 300, 50)
+    n_levels  = st.sidebar.slider("Contour levels", 5, 30, 15, 1)
+    make_gif  = st.sidebar.button("Generate GIF")
 
-    # Single-year slice
+    # single-year
     year_int = int(yr_sel)
-    row = levels.loc[levels["Year"] == year_int, well_cols].iloc[0]
-    period = levels.loc[levels["Year"] == year_int, "Period"].iloc[0].capitalize()
-    df_year = (
-        row.rename_axis("well")
-        .reset_index(name="level")
-    )
+    row      = levels.loc[levels["Year"] == year_int, well_cols].iloc[0]
+    period   = levels.loc[levels["Year"] == year_int, "Period"].iloc[0].capitalize()
+    df_year  = row.rename_axis("well").reset_index(name="level")
     df_year["well"] = df_year["well"].apply(normalise_well)
-
-    merged = df_year.merge(coords, on="well", how="inner").dropna(subset=["level"])
+    merged    = df_year.merge(coords, on="well", how="inner").dropna(subset=["level","lat","lon"])
 
     if merged.empty:
-        st.warning(
-            f"No well-level data for {yr_sel} ({period})."
-            " If this is a forecast year, please populate your CSV."
-        )
+        st.warning(f"No data for {period} year {yr_sel}")
     else:
         title = f"{period.upper()} — {yr_sel}"
-        st.subheader(f"{period.capitalize()} data — {yr_sel}")
-        st.image(
-            draw_frame(
-                merged["lon"].to_numpy(),
-                merged["lat"].to_numpy(),
-                merged["level"].to_numpy(),
-                title,
-                grid_res,
-                n_levels,
-            )
-        )
+        st.subheader(f"{period.capitalize()} data: {yr_sel}")
+        st.image(draw_frame(
+            merged["lon"], merged["lat"], merged["level"],
+            title, grid_res, n_levels
+        ))
+        with st.expander("Raw data"):
+            st.dataframe(merged.set_index("well"), use_container_width=True)
 
-        with st.expander("Raw data for this year"):
-            st.dataframe(
-                merged.set_index("well"),
-                use_container_width=True,
-            )
-
-    # GIF across all years
+    # GIF
     if make_gif:
         with st.spinner("Building GIF…"):
             frames: list[Image.Image] = []
-            for _, yr_row in levels.iterrows():
-                yr = int(yr_row["Year"])
-                period = yr_row["Period"].capitalize()
-                df_f = (
-                    yr_row[well_cols]
-                    .rename_axis("well")
-                    .reset_index(name="level")
-                )
+            for _, row in levels.iterrows():
+                yr     = int(row["Year"])
+                period= row["Period"].capitalize()
+                df_f   = row[well_cols].rename_axis("well").reset_index(name="level")
                 df_f["well"] = df_f["well"].apply(normalise_well)
-                df_f = (
-                    df_f.merge(coords, on="well", how="inner")
-                    .dropna(subset=["level"])
-                )
+                df_f       = df_f.merge(coords, on="well", how="inner").dropna(subset=["level","lat","lon"])
                 if df_f.empty:
                     continue
                 label = f"{period.upper()} — {yr}"
-                frames.append(
-                    draw_frame(
-                        df_f["lon"].to_numpy(),
-                        df_f["lat"].to_numpy(),
-                        df_f["level"].to_numpy(),
-                        label,
-                        grid_res,
-                        n_levels,
-                    )
-                )
+                frames.append(draw_frame(
+                    df_f["lon"], df_f["lat"], df_f["level"],
+                    label, grid_res, n_levels
+                ))
 
             if not frames:
-                st.error("No frames could be generated.")
+                st.error("No frames generated.")
                 return
 
             buf = io.BytesIO()
             frames[0].save(
-                buf,
-                format="GIF",
-                save_all=True,
-                append_images=frames[1:],
-                duration=500,
-                loop=0,
+                buf, format="GIF", save_all=True,
+                append_images=frames[1:], duration=500, loop=0
             )
             buf.seek(0)
 
