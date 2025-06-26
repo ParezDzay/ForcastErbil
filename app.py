@@ -53,7 +53,7 @@ def draw_frame(
     lon_arr, lat_arr, z_arr = lon_arr[mask], lat_arr[mask], z_arr[mask]
     lbls    = np.asarray(labels)[mask]
 
-    fig, ax = plt.subplots(figsize=(5.5, 5.5), dpi=150)
+    fig, ax = plt.subplots(figsize=(6.5, 6.5), dpi=150)
 
     # Interpolate surface if possible
     if len(lon_arr) >= 3:
