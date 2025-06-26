@@ -73,7 +73,7 @@ def draw_frame(
             x, y,
             name,
             fontsize=6,
-            ha="center",
+            ha="top",
             va="bottom",
             color="black",
             weight="bold",
