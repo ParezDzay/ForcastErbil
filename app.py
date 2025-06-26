@@ -23,7 +23,7 @@ COORDS_URL = (
 )
 
 # ──────────────────────────────────────────────────────────
-# HELPERS (unchanged except draw_frame)
+# HELPERS
 # ──────────────────────────────────────────────────────────
 def normalise_well(name: str) -> str:
     s = unicodedata.normalize("NFKD", str(name).strip().upper())
@@ -38,32 +38,49 @@ def rbf_surface(lon, lat, z, res):
     )
     return lon_g, lat_g, rbf(lon_g, lat_g)
 
-def draw_frame(lon, lat, z, title, grid_res, n_levels) -> Image.Image:
-    # 1) convert to float arrays
+def draw_frame(
+    lon, lat, z, labels, title: str, grid_res: int, n_levels: int
+) -> Image.Image:
+    """
+    lon, lat, z: arrays of floats
+    labels: list/array of well names (strings), same length
+    """
+    # Convert + clean
     lon_arr = np.asarray(lon, dtype=float)
     lat_arr = np.asarray(lat, dtype=float)
     z_arr   = np.asarray(z,   dtype=float)
-
-    # 2) drop any rows with NaN
-    mask = (~np.isnan(lon_arr)) & (~np.isnan(lat_arr)) & (~np.isnan(z_arr))
+    mask    = (~np.isnan(lon_arr)) & (~np.isnan(lat_arr)) & (~np.isnan(z_arr))
     lon_arr, lat_arr, z_arr = lon_arr[mask], lat_arr[mask], z_arr[mask]
+    lbls    = np.asarray(labels)[mask]
 
     fig, ax = plt.subplots(figsize=(5, 5), dpi=100)
 
-    # 3) only interpolate if we have 3+ valid wells
+    # Interpolate surface if possible
     if len(lon_arr) >= 3:
         lon_g, lat_g, z_g = rbf_surface(lon_arr, lat_arr, z_arr, grid_res)
         cf = ax.contourf(
-            lon_g, lat_g, z_g, levels=n_levels,
-            cmap="viridis", alpha=0.75
+            lon_g, lat_g, z_g, levels=n_levels, cmap="viridis", alpha=0.75
         )
         fig.colorbar(cf, ax=ax, label="Level")
     else:
-        # scatter‐only to still show values
         sc = ax.scatter(lon_arr, lat_arr, c=z_arr, cmap="viridis")
         fig.colorbar(sc, ax=ax, label="Level")
 
+    # Scatter wells & annotate
     ax.scatter(lon_arr, lat_arr, c=z_arr, edgecolors="black", s=120, label="Wells")
+    for x, y, name in zip(lon_arr, lat_arr, lbls):
+        ax.text(
+            x, y,
+            name,
+            fontsize=8,
+            ha="center",
+            va="bottom",
+            color="black",
+            weight="bold",
+            backgroundcolor="white",
+            alpha=0.7,
+        )
+
     ax.set(
         xlim=(LON_MIN, LON_MAX),
         ylim=(LAT_MIN, LAT_MAX),
@@ -104,7 +121,7 @@ def load_coords() -> pd.DataFrame:
     return df.drop_duplicates(subset="well")
 
 # ──────────────────────────────────────────────────────────
-# MAIN APP (unchanged)
+# MAIN APP
 # ──────────────────────────────────────────────────────────
 def main():
     st.set_page_config(layout="wide")
@@ -113,8 +130,9 @@ def main():
     raw    = load_levels_raw()
     coords = load_coords()
 
+    # Guarantee full 2004–2029
     all_years = pd.DataFrame({"Year": list(range(2004, 2030))})
-    levels   = (
+    levels    = (
         all_years
         .merge(raw, on="Year", how="left")
         .assign(
@@ -124,30 +142,37 @@ def main():
 
     well_cols = [c for c in levels.columns if c.startswith("W")]
     if not well_cols:
-        st.error("No W# columns found."); return
+        st.error("No W# columns found.")
+        return
 
+    # Sidebar
     years_str = levels["Year"].astype(str)
     yr_sel    = st.sidebar.selectbox("Year", years_str, index=len(years_str)-1)
     grid_res  = st.sidebar.slider("Grid resolution (px)", 100, 500, 300, 50)
     n_levels  = st.sidebar.slider("Contour levels", 5, 30, 15, 1)
     make_gif  = st.sidebar.button("Generate GIF")
 
-    # single-year
+    # Single year
     year_int = int(yr_sel)
     row      = levels.loc[levels["Year"] == year_int, well_cols].iloc[0]
     period   = levels.loc[levels["Year"] == year_int, "Period"].iloc[0].capitalize()
     df_year  = row.rename_axis("well").reset_index(name="level")
     df_year["well"] = df_year["well"].apply(normalise_well)
-    merged    = df_year.merge(coords, on="well", how="inner").dropna(subset=["level","lat","lon"])
+    merged   = df_year.merge(coords, on="well", how="inner").dropna(subset=["level","lat","lon"])
 
     if merged.empty:
-        st.warning(f"No data for {period} year {yr_sel}")
+        st.warning(f"No data for {period} {yr_sel}.")
     else:
         title = f"{period.upper()} — {yr_sel}"
-        st.subheader(f"{period.capitalize()} data: {yr_sel}")
+        st.subheader(f"{period.capitalize()} data — {yr_sel}")
         st.image(draw_frame(
-            merged["lon"], merged["lat"], merged["level"],
-            title, grid_res, n_levels
+            merged["lon"],
+            merged["lat"],
+            merged["level"],
+            merged["well"],   # pass labels here
+            title,
+            grid_res,
+            n_levels,
         ))
         with st.expander("Raw data"):
             st.dataframe(merged.set_index("well"), use_container_width=True)
@@ -166,8 +191,13 @@ def main():
                     continue
                 label = f"{period.upper()} — {yr}"
                 frames.append(draw_frame(
-                    df_f["lon"], df_f["lat"], df_f["level"],
-                    label, grid_res, n_levels
+                    df_f["lon"],
+                    df_f["lat"],
+                    df_f["level"],
+                    df_f["well"],   # labels here too
+                    label,
+                    grid_res,
+                    n_levels,
                 ))
 
             if not frames:
