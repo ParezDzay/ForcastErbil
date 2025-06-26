@@ -17,7 +17,7 @@ LEVELS_URL = "https://raw.githubusercontent.com/parezdzay/ForcastErbil/main/Mont
 COORDS_URL = "https://raw.githubusercontent.com/parezdzay/ForcastErbil/main/wells.csv"
 
 # ─────────────────────────────────────────────────────
-# HELPERS  ▸  (unchanged names)
+# HELPERS  (unchanged)
 # ─────────────────────────────────────────────────────
 def normalise_well(name: str) -> str:
     s = unicodedata.normalize("NFKD", str(name).strip().upper())
@@ -41,7 +41,6 @@ def draw_frame(lon, lat, z, label, grid_res, n_levels) -> Image.Image:
     else:
         sc = ax.scatter(lon, lat, c=z, cmap="viridis")
         fig.colorbar(sc, ax=ax, label="Level")
-
     ax.scatter(lon, lat, c=z, edgecolors="black", s=120, label="Wells")
     ax.set(
         xlim=(LON_MIN, LON_MAX),
@@ -49,7 +48,7 @@ def draw_frame(lon, lat, z, label, grid_res, n_levels) -> Image.Image:
         aspect="equal",
         xlabel="Longitude",
         ylabel="Latitude",
-        title=f"Water Table — {label}",
+        title=label,
     )
     ax.legend(loc="upper right")
     buf = io.BytesIO()
@@ -59,7 +58,7 @@ def draw_frame(lon, lat, z, label, grid_res, n_levels) -> Image.Image:
     return Image.open(buf)
 
 # ─────────────────────────────────────────────────────
-# LOADERS  ▸  (function names unchanged)
+# LOADERS  (unchanged)
 # ─────────────────────────────────────────────────────
 @st.cache_data
 def load_levels() -> pd.DataFrame:
@@ -82,29 +81,36 @@ def load_coords() -> pd.DataFrame:
     return df.drop_duplicates(subset="well")
 
 # ─────────────────────────────────────────────────────
-# MAIN APP  ▸  (only internal lines tweaked)
+# MAIN APP  (with Period tagging)
 # ─────────────────────────────────────────────────────
 def main():
     st.set_page_config(layout="wide")
     st.title("Groundwater Dashboard")
 
     levels = load_levels()
-    coords = load_coords()
+    coords  = load_coords()
+
+    # ─── Add Period column ───────────────────────────
+    levels["Period"] = levels["Year"].apply(
+        lambda y: "forecast" if y >= 2025 else "observed"
+    )
 
     well_cols = [c for c in levels.columns if c.startswith("W")]
     if not well_cols:
         st.error("No W1…Wn columns in level file.")
         return
 
-    # Sidebar
-    years = levels["Year"].astype(str)
-    yr_sel = st.sidebar.selectbox("Year", years, index=len(years) - 1)
-    grid_res = st.sidebar.slider("Grid resolution (px)", 100, 500, 300, 50)
-    n_levels = st.sidebar.slider("Contour levels", 5, 30, 15, 1)
-    make_gif = st.sidebar.button("Generate GIF (all years)")
+    # Sidebar controls
+    years   = levels["Year"].astype(str)
+    yr_sel  = st.sidebar.selectbox("Year", years, index=len(years) - 1)
+    grid_res= st.sidebar.slider("Grid resolution (px)", 100, 500, 300, 50)
+    n_levels= st.sidebar.slider("Contour levels", 5, 30, 15, 1)
+    make_gif= st.sidebar.button("Generate GIF (all years)")
 
-    # -------- Single-year plot --------
-    row = levels.loc[levels["Year"].astype(str) == yr_sel, well_cols].iloc[0]
+    # ─── Single‐year plot ─────────────────────────────
+    year_int = int(yr_sel)
+    row = levels.loc[levels["Year"] == year_int, well_cols].iloc[0]
+    period = levels.loc[levels["Year"] == year_int, "Period"].iloc[0].capitalize()
     df_year = row.rename_axis("well").reset_index(name="level")
     df_year["well"] = df_year["well"].apply(normalise_well)
     merged = df_year.merge(coords, on="well", how="inner").dropna()
@@ -112,50 +118,52 @@ def main():
     if merged.empty:
         st.error("No wells matched between files."); return
 
-    # add status tag in title
-    tag = "forecast" if int(yr_sel) >= 2025 else "observed"
-    fig_img = draw_frame(
-        merged["lon"].to_numpy(float),
-        merged["lat"].to_numpy(float),
-        merged["level"].to_numpy(float),
-        f"{yr_sel} ({tag})",
-        grid_res,
-        n_levels,
+    title_label = f"{period.upper()}: {yr_sel}"
+    st.subheader(f"{period.capitalize()} data — {yr_sel}")
+    st.image(
+        draw_frame(
+            merged["lon"].to_numpy(float),
+            merged["lat"].to_numpy(float),
+            merged["level"].to_numpy(float),
+            title_label,
+            grid_res,
+            n_levels,
+        )
     )
-    st.image(fig_img)
 
     with st.expander("Raw data"):
         st.dataframe(merged.set_index("well"), use_container_width=True)
 
-    # -------- GIF --------
+    # ─── GIF across all years ────────────────────────
     if make_gif:
         with st.spinner("Building GIF…"):
             frames: list[Image.Image] = []
             for _, row in levels.iterrows():
-                yr = int(row["Year"])
+                yr      = int(row["Year"])
+                period_ = levels.loc[levels["Year"] == yr, "Period"].iloc[0].capitalize()
                 df = row[well_cols].rename_axis("well").reset_index(name="level")
                 df["well"] = df["well"].apply(normalise_well)
                 df = df.merge(coords, on="well", how="inner").dropna()
-                if df.empty: continue
-
-                tag = "forecast" if yr >= 2025 else "observed"
-                img = draw_frame(
-                    df["lon"].to_numpy(float),
-                    df["lat"].to_numpy(float),
-                    df["level"].to_numpy(float),
-                    f"{yr} ({tag})",
-                    grid_res,
-                    n_levels,
+                if df.empty:
+                    continue
+                label = f"{period_.upper()}: {yr}"
+                frames.append(
+                    draw_frame(
+                        df["lon"].to_numpy(float),
+                        df["lat"].to_numpy(float),
+                        df["level"].to_numpy(float),
+                        label,
+                        grid_res,
+                        n_levels,
+                    )
                 )
-                frames.append(img)
-
             if not frames:
                 st.error("No frames produced."); return
 
             buf = io.BytesIO()
             frames[0].save(
                 buf, format="GIF", save_all=True,
-                append_images=frames[1:], duration=900, loop=0
+                append_images=frames[1:], duration=1000, loop=0
             )
             buf.seek(0)
 
@@ -168,6 +176,5 @@ def main():
             mime="image/gif",
         )
 
-# ─────────────────────────────────────────────────────
 if __name__ == "__main__":
     main()
