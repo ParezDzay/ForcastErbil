@@ -1,4 +1,4 @@
-no,well_name,sub_district,basin,depth_m,geological_formation,gps_coor_utm_x,gps_coor_utm_y,elevation_m,latitude,longitude
+well,well_name,sub_district,basin,depth_m,geological_formation,gps_coor_utm_x,gps_coor_utm_y,elevation_m,lat,lon
 W1,shawais/1,kasnazan,middle,134,Recent deposit+bakhtiary,417583,4012229,518,36.251453,44.082643
 W2,sebirany gawra,rzgare,middle,183,Recent deposit+bakhtiary,402134,4012027,380,36.24819,43.910736
 W3,kasnazan/10 ,kasnazan,middle,203,Recent deposit+bakhtiary,422639,4007342,627,36.207817,44.139397
