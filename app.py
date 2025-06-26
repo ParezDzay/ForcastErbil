@@ -9,6 +9,11 @@ from scipy.interpolate import Rbf
 from PIL import Image
 
 # ---------------------------------------------------------------------------
+# Toggle extra prints (set to True if you need to inspect merge keys)
+# ---------------------------------------------------------------------------
+SHOW_DEBUG = False   # <- change to True for st.write() debug outputs
+
+# ---------------------------------------------------------------------------
 # Bounding box of the Erbil study area
 # ---------------------------------------------------------------------------
 LAT_MIN, LAT_MAX = 35.80, 36.40
@@ -25,69 +30,69 @@ COORDS_URL = (
 )
 
 # ---------------------------------------------------------------------------
-# Load annual groundwater levels (Year, W1-W20)
+# Load annual groundwater levels (Year,W1-W20)
 # ---------------------------------------------------------------------------
 @st.cache_data
 def load_levels() -> pd.DataFrame:
-    """Read annual mean water-level data.  Expected header: Year,W1,…,W20."""
-    return pd.read_csv(LEVELS_URL)
+    df = pd.read_csv(LEVELS_URL)
+    # Force well columns to a uniform upper-case, no-space style
+    df.columns = [c.strip().upper() for c in df.columns]
+    return df
 
 # ---------------------------------------------------------------------------
-# Load well coordinates and guarantee unique well / lat / lon columns
+# Load well coordinates, enforce unique well/lat/lon, unify case
 # ---------------------------------------------------------------------------
 @st.cache_data
 def load_coords() -> pd.DataFrame:
-    """Read wells.csv and return a clean (well,lat,lon) table with unique cols."""
     df = pd.read_csv(COORDS_URL)
 
-    # ------------------------------------------------------------------ #
-    # 1 ▪ Lower-case all column names for easier matching
-    # ------------------------------------------------------------------ #
+    # Lower-case col names for matching
     df.columns = [c.lower() for c in df.columns]
 
-    # ------------------------------------------------------------------ #
-    # 2 ▪ Rename flexibly to 'well', 'lat', 'lon'
-    # ------------------------------------------------------------------ #
+    # Rename flexibly
     rename: dict[str, str] = {}
     for col in df.columns:
-        if any(key in col for key in ("well", "id", "no")):
+        if any(k in col for k in ("well", "id", "no")):
             rename[col] = "well"
-        elif any(key in col for key in ("lat", "north", "y")):
+        elif any(k in col for k in ("lat", "north", "y")):
             rename[col] = "lat"
-        elif any(key in col for key in ("lon", "long", "east", "x")):
+        elif any(k in col for k in ("lon", "long", "east", "x")):
             rename[col] = "lon"
     df = df.rename(columns=rename)
 
-    # ------------------------------------------------------------------ #
-    # 3 ▪ Drop duplicate *column* labels (keep first occurrence)
-    # ------------------------------------------------------------------ #
+    # Remove duplicate column labels
     df = df.loc[:, ~pd.Index(df.columns).duplicated(keep="first")]
 
-    # ------------------------------------------------------------------ #
-    # 4 ▪ Keep only the required three columns, raise if any missing
-    # ------------------------------------------------------------------ #
+    # Verify required columns
     req = {"well", "lat", "lon"}
     missing = req.difference(df.columns)
     if missing:
         raise ValueError(
             f"wells.csv is missing required column(s): {', '.join(missing)}"
         )
-    df = df[["well", "lat", "lon"]]
 
-    # ------------------------------------------------------------------ #
-    # 5 ▪ Remove rows with NA and ensure each well appears only once
-    # ------------------------------------------------------------------ #
-    df = df.dropna().drop_duplicates(subset="well", keep="first")
+    # Keep only wanted columns, drop NaNs & dups
+    df = (
+        df[["well", "lat", "lon"]]
+        .dropna()
+        .drop_duplicates(subset="well", keep="first")
+    )
 
-    # Make sure data types are correct
-    df["well"] = df["well"].astype(str)
+    # Standardise values
+    df["well"] = df["well"].astype(str).str.strip().str.upper()
     df["lat"] = df["lat"].astype(float)
     df["lon"] = df["lon"].astype(float)
+
+    # Clip to bounding box (optional safety)
+    df = df[
+        (df["lat"].between(LAT_MIN, LAT_MAX))
+        & (df["lon"].between(LON_MIN, LON_MAX))
+    ]
 
     return df
 
 # ---------------------------------------------------------------------------
-# Thin-plate-spline interpolation helper
+# Thin-plate-spline interpolation
 # ---------------------------------------------------------------------------
 def rbf_surface(lon, lat, z, res):
     rbf = Rbf(lon, lat, z, function="thin_plate")
@@ -99,13 +104,13 @@ def rbf_surface(lon, lat, z, res):
     return lon_g, lat_g, z_g
 
 # ---------------------------------------------------------------------------
-# Create one contour frame (used for both single-year plot & GIF frames)
+# Create a contour frame (single year or for GIF)
 # ---------------------------------------------------------------------------
 def draw_frame(lon_arr, lat_arr, z_arr, label, grid_res, n_levels):
     lon_g, lat_g, z_g = rbf_surface(lon_arr, lat_arr, z_arr, grid_res)
     fig, ax = plt.subplots(figsize=(5, 5), dpi=100)
     cf = ax.contourf(lon_g, lat_g, z_g, levels=n_levels, cmap="viridis", alpha=0.75)
-    ax.scatter(lon_arr, lat_arr, c=z_arr, edgecolors="black", s=60, label="Wells")
+    ax.scatter(lon_arr, lat_arr, c=z_arr, edgecolors="black", s=90, label="Wells")
     ax.set_xlim(LON_MIN, LON_MAX)
     ax.set_ylim(LAT_MIN, LAT_MAX)
     ax.set_aspect("equal", "box")
@@ -127,38 +132,50 @@ def main():
     st.set_page_config(layout="wide")
     st.title("Groundwater Dashboard")
 
-    # Load datasets
+    # Load data
     levels = load_levels()
     coords = load_coords()
 
-    # Identify well columns
-    well_cols = [c for c in levels.columns if c.upper().startswith("W")]
+    # Identify well columns (after upper-case)
+    well_cols = [c for c in levels.columns if c.startswith("W")]
     if not well_cols:
-        st.error("No columns named W1…Wn found in the level file.")
+        st.error("No columns named W1…Wn found in level file.")
         st.stop()
 
-    # Sidebar UI
+    # Sidebar controls
     st.sidebar.header("Controls")
-    year_opts = levels["Year"].astype(str)
+    year_opts = levels["YEAR"].astype(str)
     year_sel = st.sidebar.selectbox("Year", year_opts, index=len(year_opts) - 1)
     grid_res = st.sidebar.slider("Grid resolution (pixels)", 100, 500, 300, 50)
     n_levels = st.sidebar.slider("Contour levels", 5, 30, 15, 1)
     make_gif = st.sidebar.button("Generate GIF (all years)")
 
-    # ------------------------------------------------------------------ #
-    # ▫ Plot the selected year
-    # ------------------------------------------------------------------ #
-    row = levels.loc[levels["Year"].astype(str) == year_sel, well_cols].iloc[0]
+    # Row for selected year
+    row = levels.loc[levels["YEAR"].astype(str) == year_sel, well_cols].iloc[0]
+
+    # Build dataframe (well, level) → merge with coords
     year_df = (
         row.rename_axis("well")
         .reset_index(name="level")
-        .merge(coords, on="well", how="inner")
+    )
+    # Standardise well names before merge
+    year_df["well"] = year_df["well"].astype(str).str.strip().str.upper()
+
+    # (Optional debug)
+    if SHOW_DEBUG:
+        st.write("Wells in levels for year", year_sel, ":", year_df["well"].tolist())
+        st.write("Coords wells:", coords["well"].tolist())
+
+    year_df = (
+        year_df.merge(coords, on="well", how="inner")
         .dropna(subset=["lat", "lon", "level"])
     )
+
     if year_df.empty:
-        st.warning("No matching wells found for that year after merge.")
+        st.error("No wells matched between level data and coordinates.")
         st.stop()
 
+    # Plot
     lon = year_df["lon"].to_numpy(float)
     lat = year_df["lat"].to_numpy(float)
     z = year_df["level"].to_numpy(float)
@@ -167,7 +184,7 @@ def main():
 
     fig, ax = plt.subplots()
     cf = ax.contourf(lon_g, lat_g, z_g, levels=n_levels, cmap="viridis", alpha=0.75)
-    ax.scatter(lon, lat, c=z, edgecolors="black", s=80, label="Wells")
+    ax.scatter(lon, lat, c=z, edgecolors="black", s=90, label="Wells")
     ax.set_xlim(LON_MIN, LON_MAX)
     ax.set_ylim(LAT_MIN, LAT_MAX)
     ax.set_aspect("equal", "box")
@@ -178,7 +195,7 @@ def main():
     ax.legend()
     st.pyplot(fig, clear_figure=True)
 
-    # Raw data viewer
+    # Raw data view
     with st.expander("Raw data for this year"):
         st.dataframe(
             year_df[["well", "lat", "lon", "level"]]
@@ -187,19 +204,20 @@ def main():
             use_container_width=True,
         )
 
-    # ------------------------------------------------------------------ #
-    # ▫ Optional GIF across all years
-    # ------------------------------------------------------------------ #
+    # GIF option
     if make_gif:
         with st.spinner("Generating GIF…"):
             frames: list[Image.Image] = []
             for _, row in levels.iterrows():
-                yr = str(int(row["Year"]))
+                yr = str(int(row["YEAR"]))
                 frame_df = (
                     row[well_cols]
                     .rename_axis("well")
                     .reset_index(name="level")
-                    .merge(coords, on="well", how="inner")
+                )
+                frame_df["well"] = frame_df["well"].astype(str).str.strip().str.upper()
+                frame_df = (
+                    frame_df.merge(coords, on="well", how="inner")
                     .dropna(subset=["lat", "lon", "level"])
                 )
                 if frame_df.empty:
@@ -232,7 +250,7 @@ def main():
         st.subheader("Time-Series Animation")
         st.image(gif_bytes.getvalue())
         st.download_button(
-            label="Download GIF",
+            "Download GIF",
             data=gif_bytes.getvalue(),
             file_name="water_table_animation_annual.gif",
             mime="image/gif",
