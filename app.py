@@ -72,8 +72,8 @@ def draw_frame(
         ax.text(
             x, y,
             name,
-            fontsize=6,
-            ha="top",
+            fontsize=8,
+            ha="center",
             va="bottom",
             color="black",
             weight="bold",
