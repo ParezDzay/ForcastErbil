@@ -59,7 +59,7 @@ def draw_frame(
     if len(lon_arr) >= 3:
         lon_g, lat_g, z_g = rbf_surface(lon_arr, lat_arr, z_arr, grid_res)
         cf = ax.contourf(
-            lon_g, lat_g, z_g, levels=n_levels, cmap="viridis", alpha=0.75
+            lon_g, lat_g, z_g, levels=n_levels, cmap="viridis", alpha=0.6
         )
         fig.colorbar(cf, ax=ax, label="Level")
     else:
