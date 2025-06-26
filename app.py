@@ -77,7 +77,7 @@ def draw_frame(
             va="bottom",
             color="black",
             weight="bold",
-            alpha=0.7,
+            alpha=0.9,
         )
 
     ax.set(
