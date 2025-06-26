@@ -8,17 +8,13 @@ import streamlit as st
 from scipy.interpolate import Rbf
 from PIL import Image
 
-# ─────────────────────────────────────────────────────
-# CONFIG
-# ─────────────────────────────────────────────────────
+# ── CONFIG ─────────────────────────────────────────────────────────
 LAT_MIN, LAT_MAX = 35.80, 36.40
 LON_MIN, LON_MAX = 43.60, 44.30
 LEVELS_URL = "https://raw.githubusercontent.com/parezdzay/ForcastErbil/main/Monthly_Sea_Level_Data.csv"
 COORDS_URL = "https://raw.githubusercontent.com/parezdzay/ForcastErbil/main/wells.csv"
 
-# ─────────────────────────────────────────────────────
-# HELPERS  ▸  (unchanged names)
-# ─────────────────────────────────────────────────────
+# ── HELPERS ────────────────────────────────────────────────────────
 def normalise_well(name: str) -> str:
     s = unicodedata.normalize("NFKD", str(name).strip().upper())
     digits = re.findall(r"\d+", s)
@@ -41,7 +37,6 @@ def draw_frame(lon, lat, z, label, grid_res, n_levels) -> Image.Image:
     else:
         sc = ax.scatter(lon, lat, c=z, cmap="viridis")
         fig.colorbar(sc, ax=ax, label="Level")
-
     ax.scatter(lon, lat, c=z, edgecolors="black", s=120, label="Wells")
     ax.set(
         xlim=(LON_MIN, LON_MAX),
@@ -58,9 +53,7 @@ def draw_frame(lon, lat, z, label, grid_res, n_levels) -> Image.Image:
     buf.seek(0)
     return Image.open(buf)
 
-# ─────────────────────────────────────────────────────
-# LOADERS  ▸  (function names unchanged)
-# ─────────────────────────────────────────────────────
+# ── LOADERS ────────────────────────────────────────────────────────
 @st.cache_data
 def load_levels() -> pd.DataFrame:
     df = pd.read_csv(LEVELS_URL)
@@ -81,38 +74,46 @@ def load_coords() -> pd.DataFrame:
     df["lon"] = df["lon"].astype(float)
     return df.drop_duplicates(subset="well")
 
-# ─────────────────────────────────────────────────────
-# MAIN APP  ▸  (only internal lines tweaked)
-# ─────────────────────────────────────────────────────
+# ── APP ─────────────────────────────────────────────────────────────
 def main():
     st.set_page_config(layout="wide")
     st.title("Groundwater Dashboard")
 
+    # Sidebar cache‐clear
+    if st.sidebar.button("Clear cache"):
+        st.legacy_caching.clear_cache()
+        st.experimental_rerun()
+
+    # Load data
     levels = load_levels()
     coords = load_coords()
 
+    # ─ Debug: show which years we actually loaded ──────────────────
+    st.write("Years loaded from CSV:", levels["Year"].unique().tolist())
+
+    # Identify well columns
     well_cols = [c for c in levels.columns if c.startswith("W")]
     if not well_cols:
         st.error("No W1…Wn columns in level file.")
         return
 
-    # Sidebar
+    # Sidebar controls
     years = levels["Year"].astype(str)
     yr_sel = st.sidebar.selectbox("Year", years, index=len(years) - 1)
     grid_res = st.sidebar.slider("Grid resolution (px)", 100, 500, 300, 50)
     n_levels = st.sidebar.slider("Contour levels", 5, 30, 15, 1)
     make_gif = st.sidebar.button("Generate GIF (all years)")
 
-    # -------- Single-year plot --------
+    # Single‐year plot
     row = levels.loc[levels["Year"].astype(str) == yr_sel, well_cols].iloc[0]
     df_year = row.rename_axis("well").reset_index(name="level")
     df_year["well"] = df_year["well"].apply(normalise_well)
     merged = df_year.merge(coords, on="well", how="inner").dropna()
 
     if merged.empty:
-        st.error("No wells matched between files."); return
+        st.error("No wells matched between files.")
+        return
 
-    # add status tag in title
     tag = "forecast" if int(yr_sel) >= 2025 else "observed"
     fig_img = draw_frame(
         merged["lon"].to_numpy(float),
@@ -127,7 +128,7 @@ def main():
     with st.expander("Raw data"):
         st.dataframe(merged.set_index("well"), use_container_width=True)
 
-    # -------- GIF --------
+    # GIF across all years
     if make_gif:
         with st.spinner("Building GIF…"):
             frames: list[Image.Image] = []
@@ -136,8 +137,8 @@ def main():
                 df = row[well_cols].rename_axis("well").reset_index(name="level")
                 df["well"] = df["well"].apply(normalise_well)
                 df = df.merge(coords, on="well", how="inner").dropna()
-                if df.empty: continue
-
+                if df.empty:
+                    continue
                 tag = "forecast" if yr >= 2025 else "observed"
                 img = draw_frame(
                     df["lon"].to_numpy(float),
@@ -148,17 +149,19 @@ def main():
                     n_levels,
                 )
                 frames.append(img)
-
             if not frames:
-                st.error("No frames produced."); return
-
+                st.error("No frames produced.")
+                return
             buf = io.BytesIO()
             frames[0].save(
-                buf, format="GIF", save_all=True,
-                append_images=frames[1:], duration=500, loop=0
+                buf,
+                format="GIF",
+                save_all=True,
+                append_images=frames[1:],
+                duration=500,
+                loop=0,
             )
             buf.seek(0)
-
         st.subheader("Time-series animation")
         st.image(buf.getvalue())
         st.download_button(
@@ -168,6 +171,5 @@ def main():
             mime="image/gif",
         )
 
-# ─────────────────────────────────────────────────────
 if __name__ == "__main__":
     main()
